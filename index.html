@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Shoot Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📸</text></svg>" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📸</text></svg>" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#2d3436" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }
+    body { font-family: 'DM Sans', sans-serif; background: #f8f6f3; color: #2d3436; }
+    input, select, button { font-family: 'DM Sans', sans-serif; }
+    ::-webkit-scrollbar { display: none; }
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.3 } }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ─── Helpers ───
+    const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    const fmt = (d) => new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    const fmtTime = (d) => new Date(d).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+    const dur = (start, end) => {
+      const m = Math.round((new Date(end) - new Date(start)) / 60000);
+      return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+    };
+    const monthKey = (d) => new Date(d).toISOString().slice(0, 7);
+    const thisMonth = () => new Date().toISOString().slice(0, 7);
+    const monthLabel = (mk) => {
+      const [y, m] = mk.split("-");
+      return new Date(y, m - 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+    };
+    const PHOTO_DAYS = 30;
+
+    const compressImage = (file) =>
+      new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            const MAX = 360;
+            let w = img.width, h = img.height;
+            if (w > h) { if (w > MAX) { h = (h * MAX) / w; w = MAX; } }
+            else { if (h > MAX) { w = (w * MAX) / h; h = MAX; } }
+            c.width = w; c.height = h;
+            c.getContext("2d").drawImage(img, 0, 0, w, h);
+            resolve(c.toDataURL("image/jpeg", 0.55));
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      });
+
+    // ─── localStorage persistence ───
+    function useStore(key, init) {
+      const [val, setVal] = useState(() => {
+        try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : init; } catch { return init; }
+      });
+      const set = useCallback((v) => {
+        setVal((p) => {
+          const n = typeof v === "function" ? v(p) : v;
+          try { localStorage.setItem(key, JSON.stringify(n)); } catch {}
+          return n;
+        });
+      }, [key]);
+      return [val, set];
+    }
+
+    // ─── Google Sheet Sync ───
+    async function syncToSheet(url, payload) {
+      if (!url) return;
+      try {
+        await fetch(url, {
+          method: "POST",
+          mode: "no-cors",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        console.warn("Sheet sync failed:", e);
+      }
+    }
+
+    // ═══════════════════════════════════════
+    // MAIN APP
+    // ═══════════════════════════════════════
+    function App() {
+      const [page, setPage] = useState("shoot");
+      const [shoots, setShoots] = useStore("st3_shoots", []);
+      const [fabricators, setFabricators] = useStore("st3_fabs", []);
+      const [staffList, setStaffList] = useStore("st3_staff", ["Staff 1", "Staff 2", "Staff 3"]);
+      const [rate, setRate] = useStore("st3_rate", 15);
+      const [sheetUrl, setSheetUrl] = useStore("st3_sheeturl", "");
+      const [adminPin, setAdminPin] = useStore("st3_pin", "1234");
+      const [isAdmin, setIsAdmin] = useState(false);
+      const [pinInput, setPinInput] = useState("");
+      const [pinError, setPinError] = useState(false);
+
+      useEffect(() => {
+        const t = setTimeout(() => {
+          const cutoff = Date.now() - PHOTO_DAYS * 86400000;
+          setShoots((p) => p.map((s) => new Date(s.startTime).getTime() < cutoff ? { ...s, startPhoto: null, endPhoto: null } : s));
+        }, 1500);
+        return () => clearTimeout(t);
+      }, []);
+
+      const adminTabs = ["dash", "history", "settings"];
+      const handleNav = (key) => {
+        if (adminTabs.includes(key) && !isAdmin) {
+          setPage("pin:" + key); setPinInput(""); setPinError(false);
+        } else { setPage(key); }
+      };
+
+      const submitPin = (target) => {
+        if (pinInput === adminPin) {
+          setIsAdmin(true); setPage(target); setPinInput(""); setPinError(false);
+        } else { setPinError(true); setPinInput(""); }
+      };
+
+      const nav = [
+        { key: "shoot", icon: "📸", label: "Shoot" },
+        { key: "dash", icon: "📊", label: "Dashboard", admin: true },
+        { key: "history", icon: "📜", label: "History", admin: true },
+        { key: "settings", icon: "⚙️", label: "Settings", admin: true },
+      ];
+
+      return (
+        <div style={S.app}>
+          <div style={S.topBar}>
+            <span style={S.topLogo}>📸</span>
+            <span style={S.topTitle}>Shoot Tracker</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {sheetUrl && <span style={S.syncBadge}>● Synced</span>}
+              {isAdmin && <button style={S.logoutBtn} onClick={() => { setIsAdmin(false); setPage("shoot"); }}>🔓 Logout</button>}
+            </div>
+          </div>
+
+          <div style={S.content}>
+            {page.startsWith("pin:") && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                <div style={S.pinCard}>
+                  <div style={S.pinIcon}>🔒</div>
+                  <div style={S.pinTitle}>Admin Access</div>
+                  <div style={S.pinSub}>Enter PIN to continue</div>
+                  <input type="password" inputMode="numeric" maxLength={10} value={pinInput}
+                    onChange={(e) => { setPinInput(e.target.value); setPinError(false); }}
+                    placeholder="Enter PIN"
+                    style={{ ...S.pinInput, borderColor: pinError ? "#d63031" : "#dfe6e9" }}
+                    autoFocus
+                    onKeyDown={(e) => { if (e.key === "Enter") submitPin(page.split(":")[1]); }}
+                  />
+                  {pinError && <div style={S.pinErr}>Wrong PIN. Try again.</div>}
+                  <button style={S.btnPrimary} onClick={() => submitPin(page.split(":")[1])}>Unlock</button>
+                  <button style={{ ...S.btnOutline, marginTop: 10, width: "100%" }} onClick={() => setPage("shoot")}>← Back</button>
+                </div>
+              </div>
+            )}
+            {page === "shoot" && <ShootPage shoots={shoots} setShoots={setShoots} fabricators={fabricators} staffList={staffList} rate={rate} sheetUrl={sheetUrl} />}
+            {page === "dash" && isAdmin && <DashPage shoots={shoots} fabricators={fabricators} staffList={staffList} rate={rate} />}
+            {page === "history" && isAdmin && <HistoryPage shoots={shoots} setShoots={setShoots} sheetUrl={sheetUrl} />}
+            {page === "settings" && isAdmin && <SettingsPage fabricators={fabricators} setFabricators={setFabricators} staffList={staffList} setStaffList={setStaffList} rate={rate} setRate={setRate} sheetUrl={sheetUrl} setSheetUrl={setSheetUrl} shoots={shoots} setShoots={setShoots} adminPin={adminPin} setAdminPin={setAdminPin} />}
+          </div>
+
+          <div style={S.bottomNav}>
+            {nav.map((n) => {
+              const isActive = page === n.key || page === "pin:" + n.key;
+              return (
+                <button key={n.key} onClick={() => handleNav(n.key)} style={S.navBtn}>
+                  <span style={S.navIcon}>{n.icon}</span>
+                  <span style={{ ...S.navLabel, ...(isActive ? S.navLabelActive : {}) }}>{n.label}</span>
+                  {n.admin && !isAdmin && <span style={S.lockDot}>🔒</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════
+    // SHOOT PAGE
+    // ═══════════════════════════════════════
+    function ShootPage({ shoots, setShoots, fabricators, staffList, rate, sheetUrl }) {
+      const [currentStaff, setCurrentStaff] = useState("");
+      const [showForm, setShowForm] = useState(false);
+      const [toast, setToast] = useState(null);
+
+      const showToast = (text, type = "success") => { setToast({ text, type }); setTimeout(() => setToast(null), 2500); };
+      const myActive = currentStaff ? shoots.filter((s) => s.staff === currentStaff && s.status === "in-progress") : [];
+
+      if (!currentStaff) {
+        return (
+          <div style={{ animation: "fadeIn 0.3s ease" }}>
+            <div style={S.card}>
+              <div style={S.cardHead}>Who's shooting?</div>
+              <div style={S.staffSelectGrid}>
+                {staffList.map((s) => (
+                  <button key={s} style={S.staffSelectBtn} onClick={() => setCurrentStaff(s)}>
+                    <div style={S.staffSelectIcon}>👤</div>
+                    <div style={S.staffSelectName}>{s}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          <div style={S.staffHeader}>
+            <div>
+              <div style={S.staffHeaderName}>👤 {currentStaff}</div>
+              <div style={S.staffHeaderSub}>{myActive.length} active shoot{myActive.length !== 1 ? "s" : ""}</div>
+            </div>
+            <button style={S.switchBtn} onClick={() => { setCurrentStaff(""); setShowForm(false); }}>Switch</button>
+          </div>
+
+          {myActive.map((shoot) => (
+            <ActiveShootCard key={shoot.id} shoot={shoot} setShoots={setShoots} sheetUrl={sheetUrl} showToast={showToast} />
+          ))}
+
+          {showForm ? (
+            <NewShootForm staff={currentStaff} fabricators={fabricators} setShoots={setShoots} sheetUrl={sheetUrl} showToast={showToast} onDone={() => setShowForm(false)} onCancel={() => setShowForm(false)} />
+          ) : (
+            <button style={S.newShootBtn} onClick={() => setShowForm(true)}>＋ Start New Shoot</button>
+          )}
+          {toast && <Toast {...toast} />}
+        </div>
+      );
+    }
+
+    // ── Active Shoot Card ──
+    function ActiveShootCard({ shoot, setShoots, sheetUrl, showToast }) {
+      const [expanded, setExpanded] = useState(false);
+      const [endPhoto, setEndPhoto] = useState(null);
+      const fRef = useRef();
+
+      const handleEndPhoto = async (e) => { if (e.target.files[0]) setEndPhoto(await compressImage(e.target.files[0])); };
+
+      const finishShoot = () => {
+        if (!endPhoto) { showToast("Upload final poster first", "error"); return; }
+        const endTime = new Date().toISOString();
+        setShoots((p) => p.map((s) => s.id === shoot.id ? { ...s, endTime, endPhoto, status: "completed" } : s));
+        syncToSheet(sheetUrl, { action: "finish", id: shoot.id, endTime });
+        showToast("Shoot completed! ✅");
+      };
+
+      const cancelShoot = () => {
+        if (confirm("Cancel this shoot?")) {
+          setShoots((p) => p.filter((s) => s.id !== shoot.id));
+          syncToSheet(sheetUrl, { action: "delete", id: shoot.id });
+          showToast("Cancelled", "info");
+        }
+      };
+
+      return (
+        <div style={S.activeCard}>
+          <div style={S.activeCardHead} onClick={() => setExpanded(!expanded)}>
+            <div style={S.activeCardLeft}>
+              <span style={S.pulseDotSmall} />
+              <div>
+                <div style={S.activeArt}>{shoot.article}</div>
+                <div style={S.activeFab}>{shoot.fabricator} · {shoot.pieces} pcs</div>
+              </div>
+            </div>
+            <LiveTimerCompact start={shoot.startTime} />
+          </div>
+          {expanded && (
+            <div style={S.activeExpand}>
+              <div style={{ fontSize: 12, color: "#636e72", marginBottom: 12 }}>Started: {fmtTime(shoot.startTime)} · {fmt(shoot.startTime)}</div>
+              <div style={S.secTitle}>📋 Upload Final Poster to Finish</div>
+              <input ref={fRef} type="file" accept="image/*" capture="environment" onChange={handleEndPhoto} style={{ display: "none" }} />
+              {endPhoto ? (
+                <div style={S.thumbWrap}><img src={endPhoto} style={S.thumb} /><button style={S.thumbX} onClick={() => setEndPhoto(null)}>✕</button></div>
+              ) : (
+                <button style={S.uploadBtn} onClick={() => fRef.current.click()}>📷 Take Photo / Upload</button>
+              )}
+              <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+                <button style={S.btnOutline} onClick={cancelShoot}>Cancel</button>
+                <button style={S.btnGreen} onClick={finishShoot}>✅ Finish</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── New Shoot Form ──
+    function NewShootForm({ staff, fabricators, setShoots, sheetUrl, showToast, onDone, onCancel }) {
+      const [fab, setFab] = useState("");
+      const [article, setArticle] = useState("");
+      const [pieces, setPieces] = useState(6);
+      const [startPhoto, setStartPhoto] = useState(null);
+      const fRef = useRef();
+
+      const handleStartPhoto = async (e) => { if (e.target.files[0]) setStartPhoto(await compressImage(e.target.files[0])); };
+
+      const startShoot = () => {
+        if (!fab || !article.trim() || !startPhoto) { showToast("Fill all fields & upload photo", "error"); return; }
+        const s = { id: uid(), staff, fabricator: fab, article: article.trim().toUpperCase(), pieces, startTime: new Date().toISOString(), endTime: null, startPhoto, endPhoto: null, status: "in-progress" };
+        setShoots((p) => [s, ...p]);
+        syncToSheet(sheetUrl, { action: "start", ...s, startPhoto: undefined });
+        showToast("Shoot started! ⏱️");
+        onDone();
+      };
+
+      return (
+        <div style={S.card}>
+          <div style={S.cardHead}>New Shoot</div>
+          <div style={S.fieldLabel}>Fabricator</div>
+          {fabricators.length === 0 ? (
+            <div style={{ fontSize: 13, color: "#d63031", padding: "10px 0" }}>No fabricators added. Ask admin to add in Settings.</div>
+          ) : (
+            <select value={fab} onChange={(e) => setFab(e.target.value)} style={S.select}>
+              <option value="">— Select —</option>
+              {fabricators.map((f) => <option key={f} value={f}>{f}</option>)}
+            </select>
+          )}
+          <div style={S.fieldLabel}>Article Number</div>
+          <input value={article} onChange={(e) => setArticle(e.target.value)} placeholder="e.g. TK-1042" style={S.input} />
+          <div style={S.fieldLabel}>Pieces</div>
+          <div style={S.piecesRow}>
+            <button style={S.pieceBtn} onClick={() => setPieces(Math.max(1, pieces - 1))}>−</button>
+            <span style={S.pieceNum}>{pieces}</span>
+            <button style={S.pieceBtn} onClick={() => setPieces(pieces + 1)}>+</button>
+          </div>
+          <div style={{ ...S.fieldLabel, marginTop: 20 }}>📦 Master Packing Photo</div>
+          <input ref={fRef} type="file" accept="image/*" capture="environment" onChange={handleStartPhoto} style={{ display: "none" }} />
+          {startPhoto ? (
+            <div style={S.thumbWrap}><img src={startPhoto} style={S.thumb} /><button style={S.thumbX} onClick={() => setStartPhoto(null)}>✕</button></div>
+          ) : (
+            <button style={S.uploadBtn} onClick={() => fRef.current.click()}>📷 Take Photo / Upload</button>
+          )}
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button style={S.btnOutline} onClick={onCancel}>Cancel</button>
+            <button style={{ ...S.btnPrimary, flex: 1, marginTop: 0 }} onClick={startShoot}>🎬 Start Shoot</button>
+          </div>
+        </div>
+      );
+    }
+
+    function LiveTimerCompact({ start }) {
+      const [t, setT] = useState("");
+      useEffect(() => {
+        const tick = () => {
+          const s = Math.floor((Date.now() - new Date(start).getTime()) / 1000);
+          const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+          setT(h > 0 ? `${h}h ${m}m` : `${m}m`);
+        };
+        tick(); const id = setInterval(tick, 10000); return () => clearInterval(id);
+      }, [start]);
+      return <span style={S.compactTimer}>{t}</span>;
+    }
+
+    function Toast({ text, type }) {
+      const bg = type === "error" ? "#d63031" : type === "info" ? "#0984e3" : "#00b894";
+      return <div style={{ ...S.toast, background: bg }}>{text}</div>;
+    }
+
+    // ═══════════════════════════════════════
+    // DASHBOARD
+    // ═══════════════════════════════════════
+    function DashPage({ shoots, fabricators, staffList, rate }) {
+      const [month, setMonth] = useState(thisMonth());
+      const [tab, setTab] = useState("overview");
+
+      const months = [...new Set(shoots.map((s) => monthKey(s.startTime)))].sort((a, b) => b.localeCompare(a));
+      if (!months.includes(thisMonth())) months.unshift(thisMonth());
+
+      const data = shoots.filter((s) => monthKey(s.startTime) === month && s.status === "completed");
+      const totalPieces = data.reduce((a, s) => a + s.pieces, 0);
+      const totalAmount = totalPieces * rate;
+
+      return (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          <div style={S.pillRow}>
+            {months.map((m) => <button key={m} onClick={() => setMonth(m)} style={{ ...S.pill, ...(month === m ? S.pillOn : {}) }}>{monthLabel(m)}</button>)}
+          </div>
+          <div style={S.toggleRow}>
+            {[["overview", "Overview"], ["billing", "Billing"], ["staff", "Staff"]].map(([k, l]) => (
+              <button key={k} onClick={() => setTab(k)} style={{ ...S.toggle, ...(tab === k ? S.toggleOn : {}) }}>{l}</button>
+            ))}
+          </div>
+
+          {tab === "overview" && (
+            <div style={S.statGrid}>
+              <Stat icon="📸" val={data.length} label="Total Shoots" />
+              <Stat icon="👕" val={totalPieces} label="Total Pieces" />
+              <Stat icon="💰" val={`₹${totalAmount.toLocaleString("en-IN")}`} label="Total Value" color="#00b894" />
+              <Stat icon="⏱️" val={`${data.length ? Math.round(data.reduce((a, s) => a + (new Date(s.endTime) - new Date(s.startTime)) / 60000, 0) / data.length) : 0}m`} label="Avg Time" />
+              <Stat icon="📐" val={`₹${rate}/pc`} label="Rate" color="#6c5ce7" />
+              <Stat icon="🏭" val={[...new Set(data.map(s => s.fabricator))].length} label="Fabricators" color="#e17055" />
+            </div>
+          )}
+
+          {tab === "billing" && (
+            <div style={S.card}>
+              <div style={S.cardHead}>Fabricator Billing</div>
+              {data.length === 0 ? <div style={S.empty}>No shoots this month</div> : (() => {
+                const byFab = {};
+                data.forEach((s) => { if (!byFab[s.fabricator]) byFab[s.fabricator] = { n: 0, pcs: 0 }; byFab[s.fabricator].n++; byFab[s.fabricator].pcs += s.pieces; });
+                return (<>
+                  {Object.entries(byFab).map(([f, d]) => (
+                    <div key={f} style={S.billRow}>
+                      <div><div style={S.billFab}>{f}</div><div style={S.billSub}>{d.n} shoots · {d.pcs} pcs</div></div>
+                      <div style={S.billAmt}>₹{(d.pcs * rate).toLocaleString("en-IN")}</div>
+                    </div>
+                  ))}
+                  <div style={S.billTotal}><span>TOTAL</span><span style={S.billTotalAmt}>₹{totalAmount.toLocaleString("en-IN")}</span></div>
+                </>);
+              })()}
+            </div>
+          )}
+
+          {tab === "staff" && (
+            <div>
+              {staffList.map((name) => {
+                const mine = data.filter((s) => s.staff === name);
+                const totalMin = mine.reduce((a, s) => a + (new Date(s.endTime) - new Date(s.startTime)) / 60000, 0);
+                const avg = mine.length ? Math.round(totalMin / mine.length) : 0;
+                return (
+                  <div key={name} style={S.staffCard}>
+                    <div style={S.staffName}>{name}</div>
+                    <div style={S.staffGrid}>
+                      <div style={S.staffStat}><span style={S.staffNum}>{mine.length}</span><span style={S.staffLbl}>Shoots</span></div>
+                      <div style={S.staffStat}><span style={S.staffNum}>{mine.reduce((a, s) => a + s.pieces, 0)}</span><span style={S.staffLbl}>Pieces</span></div>
+                      <div style={S.staffStat}><span style={S.staffNum}>{avg}m</span><span style={S.staffLbl}>Avg Time</span></div>
+                      <div style={S.staffStat}><span style={S.staffNum}>{Math.round(totalMin)}m</span><span style={S.staffLbl}>Total</span></div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function Stat({ icon, val, label, color }) {
+      return (
+        <div style={{ ...S.statCard, borderLeftColor: color || "#e17055" }}>
+          <div style={{ fontSize: 18 }}>{icon}</div>
+          <div style={{ fontSize: 21, fontWeight: 800, color: color || "#2d3436", letterSpacing: "-0.5px" }}>{val}</div>
+          <div style={{ fontSize: 11, color: "#888", fontWeight: 600 }}>{label}</div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════
+    // HISTORY
+    // ═══════════════════════════════════════
+    function HistoryPage({ shoots, setShoots, sheetUrl }) {
+      const [month, setMonth] = useState(thisMonth());
+      const [open, setOpen] = useState(null);
+
+      const months = [...new Set(shoots.map((s) => monthKey(s.startTime)))].sort((a, b) => b.localeCompare(a));
+      if (!months.includes(thisMonth())) months.unshift(thisMonth());
+      const data = shoots.filter((s) => monthKey(s.startTime) === month && s.status === "completed");
+
+      const del = (id) => {
+        if (confirm("Delete this record?")) {
+          setShoots((p) => p.filter((s) => s.id !== id));
+          syncToSheet(sheetUrl, { action: "delete", id });
+        }
+      };
+
+      return (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          <div style={S.pillRow}>
+            {months.map((m) => <button key={m} onClick={() => setMonth(m)} style={{ ...S.pill, ...(month === m ? S.pillOn : {}) }}>{monthLabel(m)}</button>)}
+          </div>
+          <div style={S.card}>
+            <div style={S.cardHead}>History ({data.length})</div>
+            {data.length === 0 ? <div style={S.empty}>No shoots this month</div> : data.map((s) => (
+              <div key={s.id} style={S.histItem}>
+                <div style={S.histHead} onClick={() => setOpen(open === s.id ? null : s.id)}>
+                  <div><span style={S.histArt}>{s.article}</span><span style={S.histFab}>{s.fabricator}</span></div>
+                  <div style={{ textAlign: "right" }}><div style={S.histDur}>{dur(s.startTime, s.endTime)}</div><div style={S.histDate}>{fmt(s.startTime)}</div></div>
+                </div>
+                {open === s.id && (
+                  <div style={S.histBody}>
+                    <div style={S.histDetail}>Staff: <b>{s.staff}</b> · Pieces: <b>{s.pieces}</b> · {fmtTime(s.startTime)} → {fmtTime(s.endTime)}</div>
+                    <div style={{ display: "flex", gap: 14, margin: "10px 0" }}>
+                      {s.startPhoto && <div><div style={S.photoLbl}>Packing</div><img src={s.startPhoto} style={S.histThumb} /></div>}
+                      {s.endPhoto && <div><div style={S.photoLbl}>Poster</div><img src={s.endPhoto} style={S.histThumb} /></div>}
+                      {!s.startPhoto && !s.endPhoto && <div style={{ fontSize: 12, color: "#b2bec3" }}>Photos expired</div>}
+                    </div>
+                    <button style={S.delBtn} onClick={() => del(s.id)}>🗑 Delete</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════
+    // SETTINGS
+    // ═══════════════════════════════════════
+    function SettingsPage({ fabricators, setFabricators, staffList, setStaffList, rate, setRate, sheetUrl, setSheetUrl, shoots, setShoots, adminPin, setAdminPin }) {
+      const [nf, setNf] = useState("");
+      const [ns, setNs] = useState("");
+      const [nr, setNr] = useState(rate);
+      const [url, setUrl] = useState(sheetUrl);
+      const [np, setNp] = useState(adminPin);
+      const [saved, setSaved] = useState("");
+
+      const flash = (w) => { setSaved(w); setTimeout(() => setSaved(""), 1500); };
+
+      return (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          {saved && <div style={S.savedBadge}>✅ {saved} saved</div>}
+
+          <div style={S.card}>
+            <div style={S.cardHead}>🔗 Google Sheet Sync</div>
+            <div style={{ fontSize: 13, color: "#636e72", marginBottom: 12, lineHeight: 1.5 }}>Paste your Google Apps Script URL here.</div>
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/..." style={S.input} />
+            <button style={{ ...S.btnSmall, marginTop: 10 }} onClick={() => { setSheetUrl(url); flash("Sheet URL"); }}>Save URL</button>
+            {sheetUrl && <div style={{ fontSize: 12, color: "#00b894", marginTop: 8, fontWeight: 600 }}>● Connected</div>}
+          </div>
+
+          <div style={S.card}>
+            <div style={S.cardHead}>🔒 Admin PIN</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <input type="text" inputMode="numeric" value={np} onChange={(e) => setNp(e.target.value)} style={{ ...S.input, width: 120, textAlign: "center", letterSpacing: 4, fontSize: 20, fontWeight: 800 }} />
+              <button style={S.btnSmall} onClick={() => { setAdminPin(np); flash("PIN"); }}>Save</button>
+            </div>
+            <div style={{ fontSize: 12, color: "#b2bec3", marginTop: 6 }}>Current PIN: {adminPin}</div>
+          </div>
+
+          <div style={S.card}>
+            <div style={S.cardHead}>💰 Rate per Piece</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 22, fontWeight: 800 }}>₹</span>
+              <input type="number" value={nr} onChange={(e) => setNr(Number(e.target.value))} style={{ ...S.input, width: 100, textAlign: "center" }} />
+              <button style={S.btnSmall} onClick={() => { setRate(nr); flash("Rate"); }}>Save</button>
+            </div>
+          </div>
+
+          <div style={S.card}>
+            <div style={S.cardHead}>🏭 Fabricators</div>
+            {fabricators.length === 0 && <div style={{ fontSize: 13, color: "#b2bec3", marginBottom: 10 }}>No fabricators yet. Add below.</div>}
+            {fabricators.map((f, i) => (
+              <div key={f} style={S.settingRow}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{f}</span>
+                <button style={S.xBtn} onClick={() => setFabricators((p) => p.filter((_, j) => j !== i))}>✕</button>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <input value={nf} onChange={(e) => setNf(e.target.value)} placeholder="New fabricator" style={{ ...S.input, flex: 1 }} />
+              <button style={S.btnSmall} onClick={() => { if (nf.trim()) { setFabricators((p) => [...p, nf.trim()]); setNf(""); } }}>+ Add</button>
+            </div>
+          </div>
+
+          <div style={S.card}>
+            <div style={S.cardHead}>👤 Staff</div>
+            {staffList.map((s, i) => (
+              <div key={s} style={S.settingRow}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{s}</span>
+                <button style={S.xBtn} onClick={() => setStaffList((p) => p.filter((_, j) => j !== i))}>✕</button>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <input value={ns} onChange={(e) => setNs(e.target.value)} placeholder="New staff name" style={{ ...S.input, flex: 1 }} />
+              <button style={S.btnSmall} onClick={() => { if (ns.trim()) { setStaffList((p) => [...p, ns.trim()]); setNs(""); } }}>+ Add</button>
+            </div>
+          </div>
+
+          <div style={{ ...S.card, border: "1px solid #ff7675" }}>
+            <div style={{ ...S.cardHead, color: "#d63031" }}>⚠️ Danger Zone</div>
+            <button style={S.dangerBtn} onClick={() => { if (confirm("Delete ALL data?")) setShoots([]); }}>🗑 Clear All Data</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════
+    // STYLES
+    // ═══════════════════════════════════════
+    const S = {
+      app: { fontFamily: "'DM Sans', sans-serif", background: "#f8f6f3", minHeight: "100vh", maxWidth: 480, margin: "0 auto", paddingBottom: 80, color: "#2d3436" },
+      topBar: { display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", background: "#2d3436", position: "sticky", top: 0, zIndex: 100 },
+      topLogo: { fontSize: 22 },
+      topTitle: { fontSize: 17, fontWeight: 800, color: "#fff", letterSpacing: "-0.3px", flex: 1 },
+      syncBadge: { fontSize: 11, color: "#00b894", fontWeight: 700 },
+      logoutBtn: { padding: "6px 12px", borderRadius: 8, border: "1px solid #636e72", background: "transparent", color: "#dfe6e9", fontSize: 11, fontWeight: 700, cursor: "pointer" },
+      bottomNav: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, display: "flex", background: "#fff", borderTop: "1px solid #eee", padding: "6px 0 env(safe-area-inset-bottom, 8px)", zIndex: 100 },
+      navBtn: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "8px 0", border: "none", background: "transparent", cursor: "pointer", position: "relative" },
+      navIcon: { fontSize: 20 },
+      navLabel: { fontSize: 10, fontWeight: 600, color: "#b2bec3", letterSpacing: "0.3px" },
+      navLabelActive: { color: "#e17055", fontWeight: 800 },
+      lockDot: { fontSize: 8, position: "absolute", top: 4, right: "22%" },
+      content: { padding: "14px 14px 20px" },
+      pinCard: { background: "#fff", borderRadius: 20, padding: "40px 24px", textAlign: "center", border: "1px solid #f0edea", marginTop: 40 },
+      pinIcon: { fontSize: 48, marginBottom: 12 },
+      pinTitle: { fontSize: 22, fontWeight: 800, marginBottom: 4 },
+      pinSub: { fontSize: 14, color: "#b2bec3", marginBottom: 24 },
+      pinInput: { width: "100%", padding: "16px", borderRadius: 14, border: "2px solid #dfe6e9", fontSize: 24, textAlign: "center", letterSpacing: 8, fontWeight: 800, outline: "none", background: "#fafaf8", color: "#2d3436" },
+      pinErr: { color: "#d63031", fontSize: 13, fontWeight: 600, marginTop: 8, marginBottom: 4 },
+      card: { background: "#fff", borderRadius: 16, padding: "20px 18px", marginBottom: 14, border: "1px solid #f0edea" },
+      cardHead: { fontSize: 17, fontWeight: 800, marginBottom: 16, letterSpacing: "-0.3px" },
+      staffSelectGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+      staffSelectBtn: { padding: "22px 14px", borderRadius: 16, border: "2px solid #f0edea", background: "#fafaf8", cursor: "pointer", textAlign: "center", transition: "all 0.15s" },
+      staffSelectIcon: { fontSize: 32, marginBottom: 6 },
+      staffSelectName: { fontSize: 15, fontWeight: 700, color: "#2d3436" },
+      staffHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", background: "#fff", borderRadius: 14, marginBottom: 12, border: "1px solid #f0edea" },
+      staffHeaderName: { fontSize: 16, fontWeight: 800 },
+      staffHeaderSub: { fontSize: 12, color: "#b2bec3", marginTop: 2 },
+      switchBtn: { padding: "8px 16px", borderRadius: 10, border: "1.5px solid #dfe6e9", background: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", color: "#636e72" },
+      activeCard: { background: "#fff", borderRadius: 14, marginBottom: 10, border: "1px solid #f0edea", overflow: "hidden" },
+      activeCardHead: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", cursor: "pointer" },
+      activeCardLeft: { display: "flex", alignItems: "center", gap: 10 },
+      pulseDotSmall: { width: 8, height: 8, borderRadius: 4, background: "#00b894", animation: "pulse 1.5s infinite", flexShrink: 0 },
+      activeArt: { fontSize: 15, fontWeight: 800 },
+      activeFab: { fontSize: 12, color: "#b2bec3" },
+      activeExpand: { padding: "12px 16px 16px", borderTop: "1px solid #f5f3f0" },
+      compactTimer: { fontSize: 15, fontWeight: 800, color: "#e17055", fontVariantNumeric: "tabular-nums" },
+      newShootBtn: { width: "100%", padding: "18px", borderRadius: 14, border: "2px dashed #e17055", background: "transparent", fontSize: 16, fontWeight: 800, cursor: "pointer", color: "#e17055", marginTop: 6 },
+      fieldLabel: { fontSize: 11, fontWeight: 700, color: "#636e72", textTransform: "uppercase", letterSpacing: "1px", marginBottom: 8, marginTop: 18 },
+      input: { width: "100%", padding: "13px 14px", borderRadius: 12, border: "1.5px solid #dfe6e9", fontSize: 15, background: "#fafaf8", color: "#2d3436", outline: "none", boxSizing: "border-box" },
+      select: { width: "100%", padding: "13px 14px", borderRadius: 12, border: "1.5px solid #dfe6e9", fontSize: 15, background: "#fafaf8", color: "#2d3436", outline: "none", appearance: "auto" },
+      piecesRow: { display: "flex", alignItems: "center", gap: 18 },
+      pieceBtn: { width: 48, height: 48, borderRadius: 14, border: "1.5px solid #dfe6e9", background: "#fafaf8", fontSize: 22, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#2d3436" },
+      pieceNum: { fontSize: 28, fontWeight: 900, minWidth: 44, textAlign: "center" },
+      uploadBtn: { width: "100%", padding: "18px", borderRadius: 14, border: "2px dashed #dfe6e9", background: "#fafaf8", fontSize: 15, fontWeight: 600, cursor: "pointer", color: "#b2bec3" },
+      thumbWrap: { position: "relative", display: "inline-block" },
+      thumb: { width: 110, height: 110, objectFit: "cover", borderRadius: 14, border: "2px solid #dfe6e9" },
+      thumbX: { position: "absolute", top: -8, right: -8, width: 28, height: 28, borderRadius: 14, background: "#d63031", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" },
+      secTitle: { fontSize: 14, fontWeight: 700, color: "#2d3436", marginBottom: 12, marginTop: 12 },
+      btnPrimary: { width: "100%", padding: "16px", borderRadius: 14, border: "none", background: "linear-gradient(135deg, #e17055 0%, #d63031 100%)", color: "#fff", fontSize: 17, fontWeight: 800, cursor: "pointer", marginTop: 24 },
+      btnGreen: { flex: 1, padding: "15px", borderRadius: 14, border: "none", background: "linear-gradient(135deg, #00b894 0%, #00a381 100%)", color: "#fff", fontSize: 16, fontWeight: 800, cursor: "pointer" },
+      btnOutline: { padding: "15px 22px", borderRadius: 14, border: "1.5px solid #dfe6e9", background: "#fff", color: "#636e72", fontSize: 14, fontWeight: 600, cursor: "pointer" },
+      btnSmall: { padding: "12px 22px", borderRadius: 12, border: "none", background: "#e17055", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
+      toast: { padding: "12px 18px", borderRadius: 12, color: "#fff", fontSize: 14, fontWeight: 600, textAlign: "center", marginTop: 14, animation: "fadeIn 0.2s ease" },
+      statGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+      statCard: { background: "#fff", borderRadius: 14, padding: "16px 14px", borderLeft: "4px solid #e17055", border: "1px solid #f0edea" },
+      pillRow: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 10, marginBottom: 6 },
+      pill: { padding: "9px 18px", borderRadius: 22, border: "1.5px solid #dfe6e9", background: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap", color: "#636e72" },
+      pillOn: { background: "#2d3436", color: "#fff", borderColor: "#2d3436" },
+      toggleRow: { display: "flex", gap: 4, marginBottom: 14, background: "#f0edea", borderRadius: 12, padding: 4 },
+      toggle: { flex: 1, padding: "10px 0", borderRadius: 10, border: "none", background: "transparent", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#b2bec3" },
+      toggleOn: { background: "#fff", color: "#2d3436", boxShadow: "0 1px 3px rgba(0,0,0,0.08)" },
+      billRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: "1px solid #f5f3f0" },
+      billFab: { fontSize: 14, fontWeight: 700 },
+      billSub: { fontSize: 12, color: "#b2bec3", marginTop: 2 },
+      billAmt: { fontSize: 17, fontWeight: 900, color: "#00b894" },
+      billTotal: { display: "flex", justifyContent: "space-between", padding: "16px 0 4px", borderTop: "2px solid #2d3436", marginTop: 6 },
+      billTotalAmt: { fontSize: 20, fontWeight: 900, color: "#00b894" },
+      staffCard: { background: "#fff", borderRadius: 14, padding: 16, marginBottom: 10, border: "1px solid #f0edea" },
+      staffName: { fontSize: 16, fontWeight: 800, marginBottom: 12 },
+      staffGrid: { display: "flex", gap: 8 },
+      staffStat: { flex: 1, textAlign: "center", background: "#fafaf8", borderRadius: 10, padding: "10px 4px", border: "1px solid #f0edea" },
+      staffNum: { display: "block", fontSize: 20, fontWeight: 900, color: "#e17055" },
+      staffLbl: { display: "block", fontSize: 9, color: "#b2bec3", fontWeight: 700, marginTop: 2, textTransform: "uppercase" },
+      histItem: { borderBottom: "1px solid #f5f3f0", paddingBottom: 4, marginBottom: 4 },
+      histHead: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", cursor: "pointer" },
+      histArt: { fontSize: 15, fontWeight: 800, marginRight: 10 },
+      histFab: { fontSize: 12, color: "#b2bec3", fontWeight: 600 },
+      histDur: { fontSize: 14, fontWeight: 700, color: "#e17055" },
+      histDate: { fontSize: 11, color: "#b2bec3" },
+      histBody: { padding: "8px 0 12px", borderTop: "1px dashed #f0edea", animation: "fadeIn 0.2s ease" },
+      histDetail: { fontSize: 13, color: "#636e72", marginBottom: 8 },
+      histThumb: { width: 90, height: 90, objectFit: "cover", borderRadius: 10, border: "1px solid #dfe6e9" },
+      photoLbl: { fontSize: 9, fontWeight: 700, color: "#b2bec3", marginBottom: 4, textTransform: "uppercase" },
+      delBtn: { padding: "8px 16px", borderRadius: 8, border: "1px solid #ff767544", background: "#fff", color: "#d63031", fontSize: 12, fontWeight: 600, cursor: "pointer" },
+      settingRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderBottom: "1px solid #f5f3f0", fontSize: 14 },
+      xBtn: { width: 30, height: 30, borderRadius: 15, border: "1px solid #dfe6e9", background: "#fff", fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#d63031" },
+      dangerBtn: { width: "100%", padding: "14px", borderRadius: 12, border: "1.5px solid #d63031", background: "#fff", color: "#d63031", fontSize: 14, fontWeight: 700, cursor: "pointer" },
+      savedBadge: { background: "#00b894", color: "#fff", padding: "10px 18px", borderRadius: 12, fontSize: 14, fontWeight: 700, textAlign: "center", marginBottom: 12, animation: "fadeIn 0.2s ease" },
+      empty: { padding: "30px 0", textAlign: "center", color: "#b2bec3", fontSize: 14 },
+    };
+
+    ReactDOM.render(<App />, document.getElementById("root"));
+  </script>
+</body>
+</html>
