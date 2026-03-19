@@ -100,14 +100,41 @@
       const [page, setPage] = useState("shoot");
       const [shoots, setShoots] = useStore("st3_shoots", []);
       const [fabricators, setFabricators] = useStore("st3_fabs", []);
-      const [staffList, setStaffList] = useStore("st3_staff", ["Staff 1", "Staff 2", "Staff 3"]);
+      const [staffList, setStaffList] = useStore("st3_staff", []);
       const [rate, setRate] = useStore("st3_rate", 15);
       const [sheetUrl, setSheetUrl] = useStore("st3_sheeturl", "");
       const [adminPin, setAdminPin] = useStore("st3_pin", "1234");
       const [isAdmin, setIsAdmin] = useState(false);
       const [pinInput, setPinInput] = useState("");
       const [pinError, setPinError] = useState(false);
+      const [loading, setLoading] = useState(true);
+      const [syncError, setSyncError] = useState(false);
 
+      // Fetch settings from Google Sheet on load
+      useEffect(() => {
+        const url = localStorage.getItem("st3_sheeturl");
+        const parsedUrl = url ? JSON.parse(url) : "";
+        if (parsedUrl) {
+          fetch(parsedUrl)
+            .then(r => r.json())
+            .then(data => {
+              if (data.status === "ok" && data.settings) {
+                const s = data.settings;
+                if (s.staff && s.staff.length > 0) setStaffList(s.staff);
+                if (s.fabricators && s.fabricators.length > 0) setFabricators(s.fabricators);
+                if (s.rate) setRate(s.rate);
+                if (s.pin) setAdminPin(s.pin);
+                setSyncError(false);
+              }
+              setLoading(false);
+            })
+            .catch(() => { setSyncError(true); setLoading(false); });
+        } else {
+          setLoading(false);
+        }
+      }, []);
+
+      // Clean old photos
       useEffect(() => {
         const t = setTimeout(() => {
           const cutoff = Date.now() - PHOTO_DAYS * 86400000;
@@ -115,6 +142,19 @@
         }, 1500);
         return () => clearTimeout(t);
       }, []);
+
+      // Show loading screen while fetching settings
+      if (loading) {
+        return (
+          <div style={{ ...S.app, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>📸</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#2d3436" }}>Shoot Tracker</div>
+              <div style={{ fontSize: 13, color: "#b2bec3", marginTop: 8 }}>Loading settings...</div>
+            </div>
+          </div>
+        );
+      }
 
       const adminTabs = ["dash", "history", "settings"];
       const handleNav = (key) => {
@@ -512,77 +552,88 @@
     // SETTINGS
     // ═══════════════════════════════════════
     function SettingsPage({ fabricators, setFabricators, staffList, setStaffList, rate, setRate, sheetUrl, setSheetUrl, shoots, setShoots, adminPin, setAdminPin }) {
-      const [nf, setNf] = useState("");
-      const [ns, setNs] = useState("");
-      const [nr, setNr] = useState(rate);
       const [url, setUrl] = useState(sheetUrl);
-      const [np, setNp] = useState(adminPin);
       const [saved, setSaved] = useState("");
+      const [refreshing, setRefreshing] = useState(false);
 
       const flash = (w) => { setSaved(w); setTimeout(() => setSaved(""), 1500); };
 
+      const refreshSettings = () => {
+        const u = sheetUrl || url;
+        if (!u) return;
+        setRefreshing(true);
+        fetch(u)
+          .then(r => r.json())
+          .then(data => {
+            if (data.status === "ok" && data.settings) {
+              const s = data.settings;
+              if (s.staff && s.staff.length > 0) setStaffList(s.staff);
+              if (s.fabricators && s.fabricators.length > 0) setFabricators(s.fabricators);
+              if (s.rate) setRate(s.rate);
+              if (s.pin) setAdminPin(s.pin);
+              flash("Settings refreshed from Sheet");
+            }
+            setRefreshing(false);
+          })
+          .catch(() => { setRefreshing(false); flash("Failed to refresh"); });
+      };
+
       return (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          {saved && <div style={S.savedBadge}>✅ {saved} saved</div>}
+          {saved && <div style={S.savedBadge}>✅ {saved}</div>}
 
           <div style={S.card}>
-            <div style={S.cardHead}>🔗 Google Sheet Sync</div>
-            <div style={{ fontSize: 13, color: "#636e72", marginBottom: 12, lineHeight: 1.5 }}>Paste your Google Apps Script URL here.</div>
+            <div style={S.cardHead}>🔗 Google Sheet URL</div>
+            <div style={{ fontSize: 13, color: "#636e72", marginBottom: 12, lineHeight: 1.5 }}>
+              This connects the app to your Google Sheet. Paste your Apps Script URL below. This only needs to be done once per device.
+            </div>
             <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/..." style={S.input} />
-            <button style={{ ...S.btnSmall, marginTop: 10 }} onClick={() => { setSheetUrl(url); flash("Sheet URL"); }}>Save URL</button>
+            <button style={{ ...S.btnSmall, marginTop: 10 }} onClick={() => { setSheetUrl(url); flash("Sheet URL saved"); setTimeout(refreshSettings, 500); }}>Save & Connect</button>
             {sheetUrl && <div style={{ fontSize: 12, color: "#00b894", marginTop: 8, fontWeight: 600 }}>● Connected</div>}
           </div>
 
           <div style={S.card}>
-            <div style={S.cardHead}>🔒 Admin PIN</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <input type="text" inputMode="numeric" value={np} onChange={(e) => setNp(e.target.value)} style={{ ...S.input, width: 120, textAlign: "center", letterSpacing: 4, fontSize: 20, fontWeight: 800 }} />
-              <button style={S.btnSmall} onClick={() => { setAdminPin(np); flash("PIN"); }}>Save</button>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={S.cardHead}>📋 Current Settings</div>
+              <button style={{ ...S.btnSmall, padding: "8px 14px", fontSize: 12, opacity: refreshing ? 0.5 : 1 }} onClick={refreshSettings} disabled={refreshing}>
+                {refreshing ? "⏳" : "🔄"} Refresh
+              </button>
             </div>
-            <div style={{ fontSize: 12, color: "#b2bec3", marginTop: 6 }}>Current PIN: {adminPin}</div>
-          </div>
-
-          <div style={S.card}>
-            <div style={S.cardHead}>💰 Rate per Piece</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 22, fontWeight: 800 }}>₹</span>
-              <input type="number" value={nr} onChange={(e) => setNr(Number(e.target.value))} style={{ ...S.input, width: 100, textAlign: "center" }} />
-              <button style={S.btnSmall} onClick={() => { setRate(nr); flash("Rate"); }}>Save</button>
+            <div style={{ fontSize: 13, color: "#636e72", marginBottom: 16, lineHeight: 1.6, background: "#fafaf8", padding: 14, borderRadius: 12, border: "1px solid #f0edea" }}>
+              To change these, edit your <b>Google Sheet → Settings tab</b> and tap Refresh.
             </div>
-          </div>
 
-          <div style={S.card}>
-            <div style={S.cardHead}>🏭 Fabricators</div>
-            {fabricators.length === 0 && <div style={{ fontSize: 13, color: "#b2bec3", marginBottom: 10 }}>No fabricators yet. Add below.</div>}
-            {fabricators.map((f, i) => (
-              <div key={f} style={S.settingRow}>
-                <span style={{ fontSize: 14, fontWeight: 600 }}>{f}</span>
-                <button style={S.xBtn} onClick={() => setFabricators((p) => p.filter((_, j) => j !== i))}>✕</button>
-              </div>
-            ))}
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <input value={nf} onChange={(e) => setNf(e.target.value)} placeholder="New fabricator" style={{ ...S.input, flex: 1 }} />
-              <button style={S.btnSmall} onClick={() => { if (nf.trim()) { setFabricators((p) => [...p, nf.trim()]); setNf(""); } }}>+ Add</button>
+            <div style={S.settingRow}>
+              <span style={{ fontSize: 13, color: "#636e72" }}>💰 Rate/Piece</span>
+              <span style={{ fontSize: 15, fontWeight: 800 }}>₹{rate}</span>
             </div>
-          </div>
+            <div style={S.settingRow}>
+              <span style={{ fontSize: 13, color: "#636e72" }}>🔒 Admin PIN</span>
+              <span style={{ fontSize: 15, fontWeight: 800 }}>{adminPin}</span>
+            </div>
 
-          <div style={S.card}>
-            <div style={S.cardHead}>👤 Staff</div>
-            {staffList.map((s, i) => (
-              <div key={s} style={S.settingRow}>
-                <span style={{ fontSize: 14, fontWeight: 600 }}>{s}</span>
-                <button style={S.xBtn} onClick={() => setStaffList((p) => p.filter((_, j) => j !== i))}>✕</button>
-              </div>
-            ))}
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <input value={ns} onChange={(e) => setNs(e.target.value)} placeholder="New staff name" style={{ ...S.input, flex: 1 }} />
-              <button style={S.btnSmall} onClick={() => { if (ns.trim()) { setStaffList((p) => [...p, ns.trim()]); setNs(""); } }}>+ Add</button>
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#636e72", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>👤 Staff ({staffList.length})</div>
+              {staffList.length === 0 ? <div style={{ fontSize: 13, color: "#b2bec3" }}>None configured</div> : (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {staffList.map((s) => <span key={s} style={{ padding: "6px 14px", borderRadius: 8, background: "#f0edea", fontSize: 13, fontWeight: 600 }}>{s}</span>)}
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#636e72", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>🏭 Fabricators ({fabricators.length})</div>
+              {fabricators.length === 0 ? <div style={{ fontSize: 13, color: "#b2bec3" }}>None configured</div> : (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {fabricators.map((f) => <span key={f} style={{ padding: "6px 14px", borderRadius: 8, background: "#f0edea", fontSize: 13, fontWeight: 600 }}>{f}</span>)}
+                </div>
+              )}
             </div>
           </div>
 
           <div style={{ ...S.card, border: "1px solid #ff7675" }}>
             <div style={{ ...S.cardHead, color: "#d63031" }}>⚠️ Danger Zone</div>
-            <button style={S.dangerBtn} onClick={() => { if (confirm("Delete ALL data?")) setShoots([]); }}>🗑 Clear All Data</button>
+            <button style={S.dangerBtn} onClick={() => { if (confirm("Delete ALL local shoot data on this device?")) setShoots([]); }}>🗑 Clear Local Data</button>
           </div>
         </div>
       );
