@@ -78,11 +78,12 @@
       return [val, set];
     }
 
+    const SHEET_URL = "https://script.google.com/macros/s/AKfycbzhC7jDhcat6rFWns48NNgG9qJpn19Etq5PzjLNXwi28hd0qNJKobppOSFeUvEj0qmSNw/exec";
+
     // ─── Google Sheet Sync ───
     async function syncToSheet(url, payload) {
-      if (!url) return;
       try {
-        await fetch(url, {
+        await fetch(SHEET_URL, {
           method: "POST",
           mode: "no-cors",
           headers: { "Content-Type": "application/json" },
@@ -112,26 +113,20 @@
 
       // Fetch settings from Google Sheet on load
       useEffect(() => {
-        const url = localStorage.getItem("st3_sheeturl");
-        const parsedUrl = url ? JSON.parse(url) : "";
-        if (parsedUrl) {
-          fetch(parsedUrl)
-            .then(r => r.json())
-            .then(data => {
-              if (data.status === "ok" && data.settings) {
-                const s = data.settings;
-                if (s.staff && s.staff.length > 0) setStaffList(s.staff);
-                if (s.fabricators && s.fabricators.length > 0) setFabricators(s.fabricators);
-                if (s.rate) setRate(s.rate);
-                if (s.pin) setAdminPin(s.pin);
-                setSyncError(false);
-              }
-              setLoading(false);
-            })
-            .catch(() => { setSyncError(true); setLoading(false); });
-        } else {
-          setLoading(false);
-        }
+        fetch(SHEET_URL)
+          .then(r => r.json())
+          .then(data => {
+            if (data.status === "ok" && data.settings) {
+              const s = data.settings;
+              if (s.staff && s.staff.length > 0) setStaffList(s.staff);
+              if (s.fabricators && s.fabricators.length > 0) setFabricators(s.fabricators);
+              if (s.rate) setRate(s.rate);
+              if (s.pin) setAdminPin(s.pin);
+              setSyncError(false);
+            }
+            setLoading(false);
+          })
+          .catch(() => { setSyncError(true); setLoading(false); });
       }, []);
 
       // Clean old photos
@@ -552,17 +547,14 @@
     // SETTINGS
     // ═══════════════════════════════════════
     function SettingsPage({ fabricators, setFabricators, staffList, setStaffList, rate, setRate, sheetUrl, setSheetUrl, shoots, setShoots, adminPin, setAdminPin }) {
-      const [url, setUrl] = useState(sheetUrl);
       const [saved, setSaved] = useState("");
       const [refreshing, setRefreshing] = useState(false);
 
       const flash = (w) => { setSaved(w); setTimeout(() => setSaved(""), 1500); };
 
       const refreshSettings = () => {
-        const u = sheetUrl || url;
-        if (!u) return;
         setRefreshing(true);
-        fetch(u)
+        fetch(SHEET_URL)
           .then(r => r.json())
           .then(data => {
             if (data.status === "ok" && data.settings) {
@@ -583,18 +575,16 @@
           {saved && <div style={S.savedBadge}>✅ {saved}</div>}
 
           <div style={S.card}>
-            <div style={S.cardHead}>🔗 Google Sheet URL</div>
-            <div style={{ fontSize: 13, color: "#636e72", marginBottom: 12, lineHeight: 1.5 }}>
-              This connects the app to your Google Sheet. Paste your Apps Script URL below. This only needs to be done once per device.
+            <div style={S.cardHead}>🔗 Google Sheet</div>
+            <div style={{ fontSize: 13, color: "#00b894", fontWeight: 600, marginBottom: 8 }}>● Connected</div>
+            <div style={{ fontSize: 12, color: "#636e72", lineHeight: 1.5 }}>
+              All settings are managed from your Google Sheet → Settings tab. Edit the sheet and tap Refresh below to update the app.
             </div>
-            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/..." style={S.input} />
-            <button style={{ ...S.btnSmall, marginTop: 10 }} onClick={() => { setSheetUrl(url); flash("Sheet URL saved"); setTimeout(refreshSettings, 500); }}>Save & Connect</button>
-            {sheetUrl && <div style={{ fontSize: 12, color: "#00b894", marginTop: 8, fontWeight: 600 }}>● Connected</div>}
           </div>
 
           <div style={S.card}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <div style={S.cardHead}>📋 Current Settings</div>
+              <div style={{ ...S.cardHead, marginBottom: 0 }}>📋 Current Settings</div>
               <button style={{ ...S.btnSmall, padding: "8px 14px", fontSize: 12, opacity: refreshing ? 0.5 : 1 }} onClick={refreshSettings} disabled={refreshing}>
                 {refreshing ? "⏳" : "🔄"} Refresh
               </button>
